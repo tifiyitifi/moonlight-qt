@@ -194,6 +194,18 @@ CenteredGridView {
                 }
 
                 NavigableMenuItem {
+                    text: qsTr("PC Settings")
+                    // The page only edits the per-PC connection type mask, which
+                    // nothing reads while NetLinkFilter::kEnabled is false.
+                    visible: computerModel.netLinkFilterEnabled
+                    onTriggered: {
+                        var component = Qt.createComponent("PcSettingsView.qml")
+                        var pcSettingsView = component.createObject(stackView, {"computerIndex": index, "computerUuid": computerModel.getComputerUuid(index)})
+                        stackView.push(pcSettingsView)
+                    }
+                }
+
+                NavigableMenuItem {
                     text: qsTr("Rename PC")
                     onTriggered: {
                         renamePcDialog.pcIndex = index

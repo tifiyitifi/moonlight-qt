@@ -196,6 +196,72 @@
         <source>HTTPS Port: %1</source>
         <translation>HTTPS 端口: %1</translation>
     </message>
+    <message>
+        <location filename="../gui/computermodel.cpp" line="53"/>
+        <source>Windows will send the traffic to this PC through %1 even though the connection types selected here do not allow it. Several of your network adapters are in the same IP subnet, so the destination address cannot select one and the interface metric decides instead. Lower the Interface Metric of the adapter you want to use, or put the adapters on separate subnets.</source>
+        <translation>Windows 会通过 %1 把流量发送到此 PC，尽管这里勾选的连接类型并不允许这样做。你的多个网络适配器处于同一个 IP 子网中，因此无法靠目标地址来选定适配器，只能改由接口跃点来决定。请降低你想使用的适配器的接口跃点（Interface Metric），或者把这些适配器划分到不同的子网。</translation>
+    </message>
+    <message>
+        <location filename="../gui/computermodel.cpp" line="83"/>
+        <source>This PC is addressed by the name &quot;%1&quot;. Moonlight can only apply the connection types selected here to an IP address, and right now it has none for this PC to judge, so the selection is not in effect: the stream will use whichever network adapter the name reaches and Windows routes over. Add the PC by its IP address, or let Moonlight discover it over mDNS, to get the selection back.</source>
+        <translation>这台 PC 是通过名称“%1”来寻址的。Moonlight 只能把这里勾选的连接类型应用到 IP 地址上，而它目前没有这台 PC 的任何 IP 地址可供判断，因此该选择并未生效：串流将使用该名称所能到达、并由 Windows 路由的任意网络适配器。请改用 IP 地址添加这台 PC，或者让 Moonlight 通过 mDNS 自动发现它，以恢复该选择的作用。</translation>
+    </message>
+    <message>
+        <location filename="../gui/computermodel.cpp" line="108"/>
+        <source>Moonlight is not using this PC: every address it can be reached on needs a connection type that is not selected here (%1), so the PC is shown as offline. Select one of them for this PC to reach it.</source>
+        <translation>Moonlight 正在避开这台 PC：它所有可被到达的地址都需要这里未勾选的连接类型（%1），因此这台 PC 显示为离线。请为这台 PC 勾选其中任意一种以恢复连接。</translation>
+    </message>
+    <message>
+        <location filename="../gui/computermodel.cpp" line="128"/>
+        <source>Moonlight is not using the name &quot;%1&quot; to reach this PC, because the connection types selected here can only be applied to an IP address. It is using the address that name resolved to, and that address is not answering. If this PC is switched on and reachable, it may have a different address now - Moonlight looks the name up again on its own, or you can add the PC by its IP address.</source>
+        <translation>Moonlight 没有使用名称“%1”来访问这台 PC，因为这里勾选的连接类型只能应用到 IP 地址上。它正在使用该名称解析到的地址，而这个地址没有响应。如果这台 PC 已开机且可以访问，它现在的地址可能已经不同 —— Moonlight 会自行重新查询该名称，你也可以改用 IP 地址添加这台 PC。</translation>
+    </message>
+    <message>
+        <location filename="../gui/computermodel.cpp" line="164"/>
+        <source>, in use by Windows</source>
+        <translation>，Windows 当前正在使用</translation>
+    </message>
+    <message>
+        <location filename="../gui/computermodel.cpp" line="225"/>
+        <source>Allowed Connections: %1</source>
+        <translation>允许的连接类型: %1</translation>
+    </message>
+    <message>
+        <location filename="../gui/computermodel.cpp" line="226"/>
+        <source>Current Route: %1</source>
+        <translation>当前路径: %1</translation>
+    </message>
+    <message>
+        <location filename="../gui/computermodel.cpp" line="228"/>
+        <source>%1 (not allowed)</source>
+        <translation>%1（不被允许）</translation>
+    </message>
+    <message>
+        <location filename="../gui/computermodel.cpp" line="275"/>
+        <source>Ethernet (Wired)</source>
+        <translation>以太网（有线）</translation>
+    </message>
+    <message>
+        <location filename="../gui/computermodel.cpp" line="277"/>
+        <source>Wi-Fi (Wireless)</source>
+        <translation>Wi-Fi（无线）</translation>
+    </message>
+    <message>
+        <location filename="../gui/computermodel.cpp" line="279"/>
+        <source>VPN / Virtual Adapter</source>
+        <translation>VPN / 虚拟适配器</translation>
+    </message>
+    <message>
+        <location filename="../gui/computermodel.cpp" line="281"/>
+        <location filename="../gui/computermodel.cpp" line="283"/>
+        <source>Other / Unknown</source>
+        <translation>其他 / 未知</translation>
+    </message>
+    <message>
+        <location filename="../gui/computermodel.cpp" line="290"/>
+        <source>All</source>
+        <translation>全部</translation>
+    </message>
 </context>
 <context>
     <name>GamepadMapper</name>
@@ -277,6 +343,11 @@
     </message>
     <message>
         <location filename="../gui/PcView.qml" line="197"/>
+        <source>PC Settings</source>
+        <translation>计算机设置</translation>
+    </message>
+    <message>
+        <location filename="../gui/PcView.qml" line="197"/>
         <source>Rename PC</source>
         <translation>重命名计算机</translation>
     </message>
@@ -349,6 +420,102 @@
         <location filename="../gui/PcView.qml" line="351"/>
         <source>Enter the new name for this PC:</source>
         <translation>输入这台计算机的新名称:</translation>
+    </message>
+</context>
+<context>
+    <name>PcSettingsView</name>
+    <message>
+        <location filename="../gui/PcSettingsView.qml" line="15"/>
+        <source>PC Settings</source>
+        <translation>计算机设置</translation>
+    </message>
+    <message>
+        <location filename="../gui/PcSettingsView.qml" line="267"/>
+        <source>This PC</source>
+        <translation>这台计算机</translation>
+    </message>
+    <message>
+        <location filename="../gui/PcSettingsView.qml" line="279"/>
+        <source>Unknown PC</source>
+        <translation>未知计算机</translation>
+    </message>
+    <message>
+        <location filename="../gui/PcSettingsView.qml" line="289"/>
+        <source>Moonlight uses a single network connection to reach a PC. If this PC is reachable over more than one, the settings below control which of them Moonlight is allowed to use.</source>
+        <translation>Moonlight 通过一条网络连接访问一台计算机。如果这台计算机可以通过多条连接访问，下面的设置将控制 Moonlight 允许使用其中的哪几条。</translation>
+    </message>
+    <message>
+        <location filename="../gui/PcSettingsView.qml" line="300"/>
+        <source>Connection</source>
+        <translation>连接</translation>
+    </message>
+    <message>
+        <location filename="../gui/PcSettingsView.qml" line="310"/>
+        <source>Connection Type</source>
+        <translation>连接类型</translation>
+    </message>
+    <message>
+        <location filename="../gui/PcSettingsView.qml" line="326"/>
+        <source>Deselect a connection type to stop Moonlight from using it for this PC. Leave everything selected to keep the default behavior of using whichever connection responds first. If deselecting leaves this PC with no address at all, it is reported as offline rather than falling back to a connection type you removed. The paths currently available are listed below.</source>
+        <translation>取消勾选某种连接类型，即可阻止 Moonlight 对这台计算机使用该类型。保持全部勾选则维持默认行为，使用最先响应的连接。如果取消勾选后这台计算机已没有任何地址，它会被报告为离线，而不会退回到你已取消的连接类型。当前可用的连接路径列在下方。</translation>
+    </message>
+    <message>
+        <location filename="../gui/PcSettingsView.qml" line="334"/>
+        <source>Ethernet (Wired)</source>
+        <translation>以太网（有线）</translation>
+    </message>
+    <message>
+        <location filename="../gui/PcSettingsView.qml" line="342"/>
+        <source>Wi-Fi (Wireless)</source>
+        <translation>Wi-Fi（无线）</translation>
+    </message>
+    <message>
+        <location filename="../gui/PcSettingsView.qml" line="350"/>
+        <source>VPN / Virtual Adapter</source>
+        <translation>VPN / 虚拟适配器</translation>
+    </message>
+    <message>
+        <location filename="../gui/PcSettingsView.qml" line="358"/>
+        <source>Other / Unknown</source>
+        <translation>其他 / 未知</translation>
+    </message>
+    <message>
+        <location filename="../gui/PcSettingsView.qml" line="365"/>
+        <source>Allow any network adapter that Moonlight does not recognize. Leave this selected unless you are certain no other adapter is involved.</source>
+        <translation>允许使用 Moonlight 无法识别的任何网络适配器。除非你确定不涉及其他适配器，否则请保持勾选。</translation>
+    </message>
+    <message>
+        <location filename="../gui/PcSettingsView.qml" line="372"/>
+        <source>At least one connection type must stay selected, otherwise this PC could not be reached.</source>
+        <translation>必须至少保留一种连接类型，否则将无法连接这台计算机。</translation>
+    </message>
+    <message>
+        <location filename="../gui/PcSettingsView.qml" line="412"/>
+        <source>What this selection does and does not control</source>
+        <translation>此选择的作用与局限</translation>
+    </message>
+    <message>
+        <location filename="../gui/PcSettingsView.qml" line="435"/>
+        <source>The selection filters this PC&apos;s addresses, not the network adapter the traffic leaves through. An address Moonlight may not use is never probed, and the stream is pinned to the address that did answer. Whether that also keeps the traffic off a deselected adapter depends on your network layout.
+
+Different networks - the selection holds. With a direct Ethernet cable between the two PCs (which normally falls back to a 169.254.x.x link-local address), this PC&apos;s Wi-Fi address has no route over your wired adapter at all, so it is dropped and discovery, the control channel and the stream all stay on the wired address.
+
+Same subnet - the selection cannot be enforced. When both PCs are plugged into the same router and are also on the same Wi-Fi, both of this PC&apos;s addresses are reachable over your wired adapter, so both of them survive the selection and Windows decides which adapter carries the traffic by interface metric. Moonlight reports that below instead of overriding it: lower the Interface Metric of the adapter you want to use, or put the two networks on separate subnets.</source>
+        <translation>此选择筛选的是这台计算机的地址，而不是流量实际从哪个网络适配器发出。Moonlight 不允许使用的地址永远不会被探测，串流也会固定到那个作出响应的地址上。这是否同时能让流量避开被你取消勾选的适配器，则取决于你的网络布局。
+
+不同网络 —— 此选择有效。如果两台计算机之间用网线直接相连（这种情况通常会退回 169.254.x.x 链路本地地址），这台计算机的 Wi-Fi 地址在你的有线适配器上根本没有路由，因此会被丢弃，主机发现、控制通道和串流都会始终使用有线地址。
+
+同一子网 —— 此选择无法强制生效。当两台计算机都接在同一个路由器上、并且同时连在同一个 Wi-Fi 时，这台计算机的两个地址都能通过你的有线适配器到达，因此都会通过此选择的筛选，最终由 Windows 按接口跃点来决定流量走哪个适配器。Moonlight 会在下方报告这种情况，而不会强行覆盖它：请降低你想使用的适配器的接口跃点（Interface Metric），或者把这两个网络划分到不同的子网。</translation>
+    </message>
+    <message>
+        <location filename="../gui/PcSettingsView.qml" line="443"/>
+        <source>Paths currently available to this PC:</source>
+        <translation>当前可用的连接路径:</translation>
+    </message>
+    <message>
+        <location filename="../gui/PcSettingsView.qml" line="453"/>
+        <source>This PC is offline, so no path is currently available.</source>
+        <translation>这台计算机当前离线，因此没有可用的连接路径。</translation>
     </message>
 </context>
 <context>

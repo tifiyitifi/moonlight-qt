@@ -1,5 +1,42 @@
 # Moonlight PC
 
+> ## ⚠️ 这是 Moonlight 官方项目的 Fork
+>
+> 本仓库基于 [**moonlight-stream/moonlight-qt**](https://github.com/moonlight-stream/moonlight-qt)（GPLv3），
+> **并非官方仓库**。功能问题请优先提交到上游；本仓库仅用于个人定制与便携包分发。
+>
+> ### 相对上游的改动
+>
+> **1. 按主机的连接类型过滤（主要功能）**
+>
+> Moonlight 访问一台主机时只会走一条网络连接。当这台主机存在多个可达地址时，
+> 现在可以针对它**单独选择**允许 Moonlight 使用的连接类型（以太网 / Wi-Fi /
+> VPN 虚拟适配器 / 其他），并查看当前实际可用的连接路径。对应界面为主机右键菜单中的
+> `PC Settings` 项。
+>
+> 该选择作用于**地址**而非网卡：不允许使用的地址不会被探测，串流会固定到那个作出响应的地址；
+> 若收窄后该主机已无任何可用地址，主机会显示为**离线**，而不会回退到你已取消的类型。
+> 当两台设备处于同一子网时，操作系统会按接口跃点覆盖这一选择，界面会明确提示并给出处理方法。
+>
+> **2. `scripts/build-portable-zip.bat`**
+>
+> 只产出便携 zip 的打包脚本：跳过 MSI 步骤，并强制写入 `portable.dat` 标记文件，
+> 使 QSettings 以及日志、缓存路径相对解压目录，不与系统上已安装的 Moonlight 共享状态。
+>
+> **3. 简体中文翻译补全**
+>
+> 为上述新增界面补齐 zh_CN 文案。
+>
+> ### 关于本仓库的 Release
+>
+> **本仓库的 Release 只提供 x64 免安装便携包（`MoonlightPortable-x64-*.zip`），不提供 MSI 安装包。**
+>
+> - 请直接解压运行，**不要用 `msiexec` 安装**来自本仓库的任何产物
+> - 便携包首次运行会生成新的客户端身份，**需要重新配对所有主机**
+> - 官方版本请见 [moonlight-stream/moonlight-qt/releases](https://github.com/moonlight-stream/moonlight-qt/releases)
+
+---
+
 [Moonlight PC](https://moonlight-stream.org) is an open source PC client for NVIDIA GameStream and [Sunshine](https://github.com/LizardByte/Sunshine).
 
 Moonlight also has mobile versions for [Android](https://github.com/moonlight-stream/moonlight-android) and [iOS](https://github.com/moonlight-stream/moonlight-ios).

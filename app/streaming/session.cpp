@@ -2,6 +2,7 @@
 #include "settings/streamingpreferences.h"
 #include "streaming/streamutils.h"
 #include "backend/richpresencemanager.h"
+#include "backend/netlink.h"
 
 #include <Limelight.h>
 #include "SDL_compat.h"
@@ -40,6 +41,8 @@
 #include <QGuiApplication>
 #include <QCursor>
 #include <QScreen>
+
+#include <utility>
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 #include <QQuickOpenGLUtils>
@@ -1579,18 +1582,52 @@ public:
 // Called in a non-main thread
 bool Session::startConnectionAsync()
 {
+    // Take a single locked snapshot of everything we read off the host below.
+    // Session::start() hands the GUI thread back before we get here, so both
+    // the polling thread and the connection type UI can rewrite these fields
+    // while we build the session. Reading them one at a time is not just
+    // stale-but-consistent: NvAddress holds a QString, so an unsynchronized
+    // read can land on an already-freed d-pointer. It also has to be a
+    // *single* snapshot, because the HTTPS control channel, the address
+    // moonlight-common-c resolves, and the RTSP pin below all have to name
+    // the same host. If they disagree we reintroduce exactly the NIC mismatch
+    // the pinning exists to prevent.
+    NvAddress activeAddress;
+    uint16_t activeHttpsPort;
+    QSslCertificate serverCert;
+    quint32 allowedLinkTypes;
+    bool isNvidiaServerSoftware;
+    int currentGameId;
+    int serverCodecModeSupport;
+    QVector<NvDisplayMode> displayModes;
+    QString gfeVersion;
+    QString appVersion;
+    {
+        QReadLocker lock(&m_Computer->lock);
+        activeAddress = m_Computer->activeAddress;
+        activeHttpsPort = m_Computer->activeHttpsPort;
+        serverCert = m_Computer->serverCert;
+        allowedLinkTypes = m_Computer->allowedLinkTypes;
+        isNvidiaServerSoftware = m_Computer->isNvidiaServerSoftware;
+        currentGameId = m_Computer->currentGameId;
+        serverCodecModeSupport = m_Computer->serverCodecModeSupport;
+        displayModes = m_Computer->displayModes;
+        gfeVersion = m_Computer->gfeVersion;
+        appVersion = m_Computer->appVersion;
+    }
+
     // The UI should have ensured the old game was already quit
     // if we decide to stream a different game.
-    Q_ASSERT(m_Computer->currentGameId == 0 ||
-             m_Computer->currentGameId == m_App.id);
+    Q_ASSERT(currentGameId == 0 ||
+             currentGameId == m_App.id);
 
     bool enableGameOptimizations;
-    if (m_Computer->isNvidiaServerSoftware) {
+    if (isNvidiaServerSoftware) {
         // GFE will set all settings to 720p60 if it doesn't recognize
         // the chosen resolution. Avoid that by disabling SOPS when it
         // is not streaming a supported resolution.
         enableGameOptimizations = false;
-        for (const NvDisplayMode &mode : std::as_const(m_Computer->displayModes)) {
+        for (const NvDisplayMode &mode : std::as_const(displayModes)) {
             if (mode.width == m_StreamConfig.width &&
                     mode.height == m_StreamConfig.height) {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -1610,9 +1647,12 @@ bool Session::startConnectionAsync()
     QString rtspSessionUrl;
 
     try {
-        NvHTTP http(m_Computer);
-        http.startApp(m_Computer->currentGameId != 0 ? "resume" : "launch",
-                      m_Computer->isNvidiaServerSoftware,
+        // NB: Built from the snapshot instead of from m_Computer, so the
+        // control channel cannot land on a different address than the one we
+        // hand to moonlight-common-c below.
+        NvHTTP http(activeAddress, activeHttpsPort, serverCert, !isNvidiaServerSoftware);
+        http.startApp(currentGameId != 0 ? "resume" : "launch",
+                      isNvidiaServerSoftware,
                       m_App.id, &m_StreamConfig,
                       enableGameOptimizations,
                       m_Preferences->playAudioOnHost,
@@ -1627,18 +1667,18 @@ bool Session::startConnectionAsync()
         return false;
     }
 
-    QByteArray hostnameStr = m_Computer->activeAddress.address().toUtf8();
-    QByteArray siAppVersion = m_Computer->appVersion.toUtf8();
+    QByteArray hostnameStr = activeAddress.address().toUtf8();
+    QByteArray siAppVersion = appVersion.toUtf8();
 
     SERVER_INFORMATION hostInfo;
     hostInfo.address = hostnameStr.data();
     hostInfo.serverInfoAppVersion = siAppVersion.data();
-    hostInfo.serverCodecModeSupport = m_Computer->serverCodecModeSupport;
+    hostInfo.serverCodecModeSupport = serverCodecModeSupport;
 
     // Older GFE versions didn't have this field
     QByteArray siGfeVersion;
-    if (!m_Computer->gfeVersion.isEmpty()) {
-        siGfeVersion = m_Computer->gfeVersion.toUtf8();
+    if (!gfeVersion.isEmpty()) {
+        siGfeVersion = gfeVersion.toUtf8();
     }
     if (!siGfeVersion.isEmpty()) {
         hostInfo.serverInfoGfeVersion = siGfeVersion.data();
@@ -1649,6 +1689,64 @@ bool Session::startConnectionAsync()
     if (!rtspSessionUrl.isEmpty()) {
         rtspSessionUrlStr = rtspSessionUrl.toUtf8();
         hostInfo.rtspSessionUrl = rtspSessionUrlStr.data();
+    }
+
+    if (NetLinkFilter::kEnabled) {
+        // The host builds the RTSP URL using its OWN interface preference, which
+        // may well be the Wi-Fi address even though we reached the control port
+        // over Ethernet. That would leave the control channel and the video
+        // stream on different NICs, so pin the stream to the address we chose.
+        // Only the host is replaced; the port, path and query string belong to
+        // the host and are left untouched.
+        //
+        // activeAddress and allowedLinkTypes come from the snapshot taken at
+        // the top of this function, so this pins to the very address the
+        // control channel just used.
+        const QUrl originalUrl(QString::fromUtf8(rtspSessionUrlStr));
+        if (originalUrl.isValid() && !originalUrl.host().isEmpty() &&
+                !activeAddress.isNull()) {
+            // Compare as addresses when both sides are literals, so IPv6
+            // formatting differences (case, compression) don't cause a
+            // needless rewrite. Otherwise fall back to a string comparison
+            // so hostnames still trigger the pin.
+            QHostAddress sessionHost, activeHost;
+            const bool sessionIsLiteral = sessionHost.setAddress(originalUrl.host());
+            const bool activeIsLiteral = activeHost.setAddress(activeAddress.address());
+            bool sameHost;
+            if (sessionIsLiteral && activeIsLiteral) {
+                sameHost = (sessionHost == activeHost);
+            }
+            else {
+                sameHost = (originalUrl.host().compare(activeAddress.address(), Qt::CaseInsensitive) == 0);
+            }
+
+            if (!sameHost) {
+                // Log why we are pinning: a disallowed link type means the
+                // user explicitly excluded the host's choice, otherwise we
+                // are just keeping control and media on the same NIC.
+                bool hostChoiceDisallowed = false;
+                if (sessionIsLiteral) {
+                    const int rtspPort = originalUrl.port(activeAddress.port());
+                    hostChoiceDisallowed = !isNetLinkTypeAllowed(
+                        netLinkTypeOf(sessionHost, quint16(rtspPort)), allowedLinkTypes);
+                }
+
+                QUrl pinnedUrl = originalUrl;
+                pinnedUrl.setHost(activeAddress.address());
+                rtspSessionUrlStr = pinnedUrl.toString().toUtf8();
+
+                // NB: Reassigning the QByteArray invalidated the pointer we
+                // handed to moonlight-common-c above, so it must be re-taken.
+                hostInfo.rtspSessionUrl = rtspSessionUrlStr.data();
+
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "Pinned the stream address from %s to %s (%s)",
+                            originalUrl.host().toLatin1().constData(),
+                            pinnedUrl.host().toLatin1().constData(),
+                            hostChoiceDisallowed ? "host choice not allowed"
+                                                 : "keep control and media on the same NIC");
+            }
+        }
     }
 
     if (m_Preferences->packetSize != 0) {

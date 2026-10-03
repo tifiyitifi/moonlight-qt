@@ -1,0 +1,87 @@
+---
+name: Release portable
+
+# Publishes the portable zip as a GitHub Release. Upstream's CI never creates a
+# release at all - build.yml and the three workflows it calls only compile and
+# upload build artifacts with `permissions: contents: read`. This workflow exists
+# because this fork ships one artifact, and shipping an MSI here would be
+# actively harmful: the UpgradeCode in wix/Moonlight/Product.wxs is the official
+# Moonlight one, so installing it replaces an existing official install and the
+# uninstall custom action deletes HKCU\Software\Moonlight Game Streaming Project.
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-portable-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  QT_VERSION: "6.11.2"
+
+jobs:
+  release-portable:
+    runs-on: windows-2025
+    steps:
+      # build-portable-zip.bat:114-119 prefers CI_VERSION over app/version.txt, and
+      # the name it stamps on the zip is MoonlightPortable-<arch>-<CI_VERSION>.zip,
+      # so this is also what the Publish step below has to match. github.ref_name
+      # keeps the leading "v"; a suffix is kept, so v6.1.0-portable.1 -> 6.1.0-portable.1.
+      - name: Resolve version
+        shell: bash
+        run: echo "CI_VERSION=${GITHUB_REF_NAME#v}" >> "${GITHUB_ENV}"
+
+      - name: Checkout Repository
+        uses: actions/checkout@v5
+        with:
+          submodules: 'recursive'
+          fetch-depth: 1
+
+      - name: Download dependencies
+        run: powershell ./setup-deps.ps1
+
+      # Parameters copied verbatim from build-win-mac.yml:47-55, which is green on
+      # upstream master. The aqtsource pin is the part that matters: without it the
+      # action resolves aqtinstall from PyPI and cannot install 6.11.2, and the step
+      # fails before anything is built. tools_qtcreator_gui is what upstream installs
+      # on Windows.
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          cache: true
+          set-env: false
+          add-tools-to-path: false
+          tools: 'tools_qtcreator_gui'
+          arch: win64_msvc2022_64
+          version: ${{ env.QT_VERSION }}
+          aqtsource: 'git+https://github.com/miurahr/aqtinstall.git@073e34d7c2ab4ae6961ed7cca690b3abd5ba5a7e'
+
+      # The script derives both QT_PATH and the target architecture from
+      # `where qmake`, so all it needs from us is Qt's bin on PATH. The arch
+      # argument upstream CI passes to build-arch.bat is ignored there, which is
+      # why nothing is passed here either.
+      - name: Build portable package
+        shell: cmd
+        run: |
+          set "PATH=${{ runner.workspace }}\Qt\${{ env.QT_VERSION }}\msvc2022_64\bin;C:\Program Files\7-Zip;%PATH%"
+          scripts\build-portable-zip.bat release
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/installer-x64-release/MoonlightPortable-x64-${{ env.CI_VERSION }}.zip
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body: |
+            x64 免安装便携包。
+
+            直接解压运行即可，不要用 `msiexec` 安装。
+
+            首次运行会生成新的客户端身份，**需要重新配对所有主机**。
+
+            官方版本请见 https://github.com/moonlight-stream/moonlight-qt/releases

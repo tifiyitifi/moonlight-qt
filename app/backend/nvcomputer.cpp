@@ -1,11 +1,14 @@
 #include "nvcomputer.h"
 #include "nvapp.h"
+#include "netlink.h"
 #include "settings/compatfetcher.h"
 
 #include <QUdpSocket>
 #include <QHostInfo>
 #include <QNetworkInterface>
 #include <QNetworkProxy>
+
+#include <utility>
 
 #define SER_NAME "hostname"
 #define SER_UUID "uuid"
@@ -22,6 +25,9 @@
 #define SER_SRVCERT "srvcert"
 #define SER_CUSTOMNAME "customname"
 #define SER_NVIDIASOFTWARE "nvidiasw"
+#define SER_MDNSADDRS "mdnsaddresses"
+#define SER_RESOLVEDADDRS "resolvedaddresses"
+#define SER_ALLOWEDLINKTYPES "allowedlinktypes"
 
 NvComputer::NvComputer(QSettings& settings)
 {
@@ -39,6 +45,33 @@ NvComputer::NvComputer(QSettings& settings)
                                     settings.value(SER_MANUALPORT, QVariant(DEFAULT_HTTP_PORT)).toUInt());
     this->serverCert = QSslCertificate(settings.value(SER_SRVCERT).toByteArray());
     this->isNvidiaServerSoftware = settings.value(SER_NVIDIASOFTWARE).toBool();
+
+    // Absent key means a host saved before this feature existed, which must
+    // keep behaving exactly like it did before, so the default is NLT_ALL.
+    // Sanitize hand-edited or corrupted values: zero or unknown bits would
+    // otherwise leave the host permanently falling back to the unfiltered list.
+    this->allowedLinkTypes = settings.value(SER_ALLOWEDLINKTYPES, QVariant(NLT_ALL)).toUInt();
+    if (this->allowedLinkTypes == 0 || (this->allowedLinkTypes & ~quint32(NLT_ALL)) != 0) {
+        this->allowedLinkTypes = NLT_ALL;
+    }
+
+    int mdnsAddrCount = settings.beginReadArray(SER_MDNSADDRS);
+    this->mdnsAddresses.reserve(mdnsAddrCount);
+    for (int i = 0; i < mdnsAddrCount; i++) {
+        settings.setArrayIndex(i);
+        this->mdnsAddresses.append(NvAddress(settings.value("address").toString(),
+                                             settings.value("port", QVariant(DEFAULT_HTTP_PORT)).toUInt()));
+    }
+    settings.endArray();
+
+    int resolvedAddrCount = settings.beginReadArray(SER_RESOLVEDADDRS);
+    this->resolvedAddresses.reserve(resolvedAddrCount);
+    for (int i = 0; i < resolvedAddrCount; i++) {
+        settings.setArrayIndex(i);
+        this->resolvedAddresses.append(NvAddress(settings.value("address").toString(),
+                                                 settings.value("port", QVariant(DEFAULT_HTTP_PORT)).toUInt()));
+    }
+    settings.endArray();
 
     int appCount = settings.beginReadArray(SER_APPLIST);
     this->appList.reserve(appCount);
@@ -92,6 +125,46 @@ void NvComputer::serialize(QSettings& settings, bool serializeApps) const
     settings.setValue(SER_MANUALPORT, manualAddress.port());
     settings.setValue(SER_SRVCERT, serverCert.toPem());
     settings.setValue(SER_NVIDIASOFTWARE, isNvidiaServerSoftware);
+    // Deliberately not written while the filter is compiled out: leaving the
+    // stored mask untouched is what makes the flag behave like a kill switch.
+    // A choice the user made while the feature was live survives on disk and
+    // takes effect again if the flag is flipped back, where writing NLT_ALL
+    // here would silently discard it.
+    if (NetLinkFilter::kEnabled) {
+        settings.setValue(SER_ALLOWEDLINKTYPES, allowedLinkTypes);
+    }
+
+    // Avoid deleting an existing mDNS address list if we couldn't get one
+    if (NetLinkFilter::kEnabled && !mdnsAddresses.isEmpty()) {
+        settings.remove(SER_MDNSADDRS);
+        settings.beginWriteArray(SER_MDNSADDRS);
+        for (int i = 0; i < mdnsAddresses.count(); i++) {
+            settings.setArrayIndex(i);
+            settings.setValue("address", mdnsAddresses.at(i).address());
+            settings.setValue("port", mdnsAddresses.at(i).port());
+        }
+        settings.endArray();
+    }
+
+    // Unlike the mDNS list, an empty one here is meaningful rather than
+    // missing: ComputerManager clears it when the mask goes back to NLT_ALL,
+    // so a host the user has no preference for keeps the exact address list it
+    // had before this feature existed. Leaving stale entries on disk would
+    // resurrect them on the next launch, so the key is dropped either way.
+    // Skipped entirely while the filter is compiled out, for the same reason
+    // SER_ALLOWEDLINKTYPES is: the stored choice has to survive the flag.
+    if (NetLinkFilter::kEnabled) {
+        settings.remove(SER_RESOLVEDADDRS);
+        if (!resolvedAddresses.isEmpty()) {
+            settings.beginWriteArray(SER_RESOLVEDADDRS);
+            for (int i = 0; i < resolvedAddresses.count(); i++) {
+                settings.setArrayIndex(i);
+                settings.setValue("address", resolvedAddresses.at(i).address());
+                settings.setValue("port", resolvedAddresses.at(i).port());
+            }
+            settings.endArray();
+        }
+    }
 
     // Avoid deleting an existing applist if we couldn't get one
     if (!appList.isEmpty() && serializeApps) {
@@ -117,6 +190,9 @@ bool NvComputer::isEqualSerialized(const NvComputer &that) const
            this->manualAddress == that.manualAddress &&
            this->serverCert == that.serverCert &&
            this->isNvidiaServerSoftware == that.isNvidiaServerSoftware &&
+           this->mdnsAddresses == that.mdnsAddresses &&
+           this->resolvedAddresses == that.resolvedAddresses &&
+           this->allowedLinkTypes == that.allowedLinkTypes &&
            this->appList == that.appList;
 }
 
@@ -136,6 +212,10 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
     if (this->name.isEmpty()) {
         this->name = "UNKNOWN";
     }
+
+    // A freshly polled host has no user preference yet. update() must never
+    // propagate this over the stored value.
+    this->allowedLinkTypes = NLT_ALL;
 
     this->uuid = NvHTTP::getXmlString(serverInfo, "uniqueid");
     QString newMacString = NvHTTP::getXmlString(serverInfo, "mac");
@@ -485,11 +565,36 @@ bool NvComputer::updateAppList(QVector<NvApp> newAppList) {
 QVector<NvAddress> NvComputer::uniqueAddresses() const
 {
     QReadLocker readLocker(&lock);
+    return addressesUnlocked();
+}
+
+QVector<NvAddress> NvComputer::addressesUnlocked() const
+{
     QVector<NvAddress> uniqueAddressList;
 
     // Start with addresses correctly ordered
     uniqueAddressList.append(activeAddress);
     uniqueAddressList.append(localAddress);
+    if (NetLinkFilter::kEnabled) {
+        // Every other address the host advertised over mDNS. These are ranked
+        // below the working address, but above the WAN address, because a
+        // multi-NIC host's extra addresses are still far better than the
+        // Internet.
+        for (const NvAddress& mdnsAddress : std::as_const(mdnsAddresses)) {
+            uniqueAddressList.append(mdnsAddress);
+        }
+        // Literals resolved from a hostname the user typed. These sit ABOVE
+        // remoteAddress and manualAddress on purpose: the name they replace is
+        // last precisely because it is the weakest address we have, but once
+        // it has been resolved we want the poller to probe the literal FIRST.
+        // That is what makes activeAddress settle on a literal, and the RTSP
+        // pin in Session::startConnectionAsync() rewrites the stream host to
+        // activeAddress - a hostname there would make the pin a no-op and the
+        // mask unenforced for the media path, which is where the bandwidth is.
+        for (const NvAddress& resolvedAddress : std::as_const(resolvedAddresses)) {
+            uniqueAddressList.append(resolvedAddress);
+        }
+    }
     uniqueAddressList.append(remoteAddress);
     uniqueAddressList.append(ipv6Address);
     uniqueAddressList.append(manualAddress);
@@ -516,16 +621,396 @@ QVector<NvAddress> NvComputer::uniqueAddresses() const
     return uniqueAddressList;
 }
 
+QVector<NvAddress> NvComputer::allowedAddresses() const
+{
+    if (!NetLinkFilter::kEnabled) {
+        // Fallback: the original, unfiltered behavior
+        return uniqueAddresses();
+    }
+
+    quint32 allowed;
+    QString hostName;
+    bool alreadyLogged;
+    {
+        // Take the mask first, since uniqueAddresses() acquires the same lock
+        // and CopySafeReadWriteLock is not recursive. Snapshot everything we
+        // need for the fallback warning here so we never touch member state
+        // without the lock (allowedAddresses() runs on the polling thread
+        // while renameHost()/setHostConnectionOptions() may write concurrently).
+        QReadLocker readLocker(&lock);
+        allowed = allowedLinkTypes;
+        hostName = name;
+        alreadyLogged = linkFilterFallbackLogged;
+    }
+
+    // Nothing is being filtered, so skip the route probes entirely. This is
+    // the state of every host the user never opened the PC settings page for,
+    // and allowedAddresses() runs from the polling loop every 3 seconds for
+    // every address we know about, where each probe costs a UDP connect plus
+    // two QNetworkInterface::allInterfaces() enumerations.
+    if (allowed == NLT_ALL) {
+        return uniqueAddresses();
+    }
+
+    QVector<NvAddress> allowedAddressList;
+    QVector<NvAddress> unclassifiable;
+
+    // A hostname cannot be probed, so its verdict can only be reached once we
+    // know what the literals we DO have to judge came out as. Collecting the
+    // names separately keeps the literal order untouched, and keeps a name
+    // from outranking a literal in the probe order.
+    bool sawLiteral = false;
+
+    for (const NvAddress& address : uniqueAddresses()) {
+        if (!netAddressIsLiteral(address.address())) {
+            unclassifiable.append(address);
+            continue;
+        }
+
+        sawLiteral = true;
+
+        const QVector<NetRoute> routes = netRoutesTo(QHostAddress(address.address()), address.port());
+        if (bestAllowedRoute(routes, allowed).isUsable()) {
+            allowedAddressList.append(address);
+        }
+    }
+
+    for (const NvAddress& address : std::as_const(unclassifiable)) {
+        // A name is kept ONLY while there is nothing to judge it against. Once
+        // we hold a literal for this host, the literal is the real address and
+        // the name is merely standing in for it, so it must not be able to
+        // resurrect a route the mask has already rejected - otherwise a name
+        // that resolves to nothing but a Wi-Fi address would keep a Wi-Fi-only
+        // host online under a wired-only mask, which is the one thing this
+        // filter exists to prevent.
+        //
+        // Note that the verdict does not depend on whether any literal
+        // survived: an approved literal that is not answering is not a reason to
+        // reach for the name either. The name resolves again at connect time and
+        // would answer on whatever it points at then, so using it here is the
+        // same hole with extra steps - and a worse one, because addressesUnlocked()
+        // puts activeAddress first, so a name reached this way outranks the
+        // literal it was standing in for on every later poll round and the RTSP
+        // pin in Session::startConnectionAsync() never narrows anything again.
+        //
+        // With no literal at all there is nothing to judge, and dropping the
+        // name would strand the host for good: the poller only probes what this
+        // function returns, so an empty list means it never gets another
+        // chance to learn otherwise. That is the case getUnclassifiableAddress()
+        // reports, and reaching for reachability is the right side of the
+        // trade. It is also the transient case while a resolution started by
+        // setHostConnectionOptions() is still in flight, so erring open keeps
+        // the few seconds before the literals land from looking like an outage.
+        if (sawLiteral) {
+            continue;
+        }
+
+        allowedAddressList.append(address);
+    }
+
+    if (allowedAddressList.isEmpty()) {
+        // Every address we hold for this host is a literal and none of them has
+        // any route over a connection type the user allows. The name, if there is
+        // one, was dropped above along with them, so this is the mask genuinely
+        // excluding the host, not us failing to classify it, and the warning
+        // below is accurate. Handing the poller the unfiltered list
+        // instead would latch an address that is only reachable over a
+        // connection type the user excluded, putting that type back in play for
+        // the control channel and the RTSP pin in
+        // Session::startConnectionAsync(); an empty list simply takes the host
+        // CS_OFFLINE in the polling loop, and re-allowing a type makes the next
+        // round pick the host back up with no extra bookkeeping here.
+        //
+        // Only warn once per host until the mask changes, since this runs from
+        // the polling loop every few seconds.
+        bool shouldLog = false;
+        {
+            QWriteLocker writeLocker(&lock);
+            if (!linkFilterFallbackLogged) {
+                linkFilterFallbackLogged = true;
+                shouldLog = true;
+            }
+        }
+        if (shouldLog) {
+            // Use the snapshot taken under the lock above. alreadyLogged is
+            // only kept for symmetry with the previous logic and to avoid
+            // an extra lock round-trip on the common path.
+            Q_UNUSED(alreadyLogged);
+            qWarning() << qPrintable(hostName) << "has no address reachable over a connection type that"
+                       << "is allowed for this PC. Treating it as offline.";
+        }
+        return QVector<NvAddress>();
+    }
+
+    return allowedAddressList;
+}
+
+QString NvComputer::getConflictingLinkDescription() const
+{
+    if (!NetLinkFilter::kEnabled) {
+        // Fallback: the original behavior never reported conflicts
+        return QString();
+    }
+
+    quint32 allowed;
+    NvAddress active;
+    {
+        QReadLocker readLocker(&lock);
+        allowed = allowedLinkTypes;
+        active = activeAddress;
+    }
+
+    if (active.isNull()) {
+        return QString();
+    }
+
+    const QVector<NetRoute> routes = netRoutesTo(QHostAddress(active.address()), active.port());
+
+    // Reaching a host whose routes are all disallowed is not a routing
+    // conflict to report: the mask is a hard gate, so activeAddress could only
+    // be non-null here if some route to it is allowed. Anything else means the
+    // OS picked a different adapter than the one we would, which is the case
+    // worth warning about - two adapters on-link for the same host, where the
+    // destination address cannot select the interface.
+    if (!bestAllowedRoute(routes, allowed).isUsable()) {
+        return QString();
+    }
+
+    for (const NetRoute& route : std::as_const(routes)) {
+        if (route.isPreferred && !isNetLinkTypeAllowed(route.bit(), allowed)) {
+            return route.nicDescription;
+        }
+    }
+
+    return QString();
+}
+
+NvComputer::LinkFilterProbe NvComputer::probeLinkFilter() const
+{
+    LinkFilterProbe probe;
+
+    if (!NetLinkFilter::kEnabled) {
+        // Fallback: the original behavior reported neither of these
+        return probe;
+    }
+
+    quint32 allowed;
+    QVector<NvAddress> addresses;
+    bool online;
+    {
+        // One snapshot for all three reads, since addressesUnlocked() has to be
+        // called without the lock held - CopySafeReadWriteLock is not recursive.
+        QReadLocker readLocker(&lock);
+
+        // NLT_ALL filters nothing, so there is no guarantee to be missing and
+        // no address to have excluded.
+        if (allowedLinkTypes == NLT_ALL) {
+            return probe;
+        }
+
+        allowed = allowedLinkTypes;
+        addresses = addressesUnlocked();
+        online = (state == CS_ONLINE);
+    }
+
+    for (const NvAddress& address : std::as_const(addresses)) {
+        if (!netAddressIsLiteral(address.address())) {
+            // Note the first name we see, but keep looking: a literal further
+            // down that the mask approves is not in the same state as this one,
+            // and the two are reported differently.
+            if (probe.name.isEmpty()) {
+                probe.name = address.address();
+            }
+            continue;
+        }
+
+        probe.sawLiteral = true;
+
+        const QVector<NetRoute> routes = netRoutesTo(QHostAddress(address.address()), address.port());
+
+        if (bestAllowedRoute(routes, allowed).isUsable()) {
+            // Something the mask approves is reachable. Note that "reachable"
+            // here is about the routing table, not about the host answering: the
+            // address can have a perfectly good wired route and still be an
+            // address the PC has moved away from, which is why the name cannot
+            // simply be kept as a fallback for it.
+            probe.anyLiteralAllowed = true;
+        }
+
+        // Every type this address can be reached over, kept apart from the
+        // verdict above: a route with no source address is no way to reach the
+        // host at all, and must not be offered to the user as a connection type
+        // they could have selected. Only consulted when the verdict came out
+        // negative, where the whole set is deselected by definition.
+        for (const NetRoute& route : routes) {
+            if (route.isUsable()) {
+                probe.reachableTypes |= route.bit();
+            }
+        }
+    }
+
+    probe.hostOnline = online;
+
+    return probe;
+}
+
+QString NvComputer::getUnclassifiableAddress() const
+{
+    const LinkFilterProbe probe = probeLinkFilter();
+
+    // Only the state where we hold no literal to judge the name against, which is
+    // exactly the state where allowedAddresses() keeps the name and the poller
+    // is about to use it. Once a literal has landed the name is no longer in the
+    // candidate list at all, so nothing is going to be probed or streamed over it
+    // and describing a stream that cannot happen would be the opposite of the
+    // truth. Those two states are getMaskExcludedLinkTypes()'s and
+    // getNameSuppressedAddress()'s to report, one for each of the ways a literal
+    // can leave the host unreachable.
+    if (probe.sawLiteral) {
+        return QString();
+    }
+
+    // The mask cannot be enforced on a name and the poller is about to use it,
+    // and nothing downstream will say so - the RTSP pin in
+    // Session::startConnectionAsync() rewrites to the same string it already
+    // had. Reporting it here is the only way the user finds out.
+    return probe.name;
+}
+
+quint32 NvComputer::getMaskExcludedLinkTypes() const
+{
+    const LinkFilterProbe probe = probeLinkFilter();
+
+    // The complement of getUnclassifiableAddress(): the name is only reachable
+    // while there is no literal, and this is the state where one exists and the
+    // mask turned down every one of them. allowedAddresses() drops the name
+    // here, so the poller gets an empty candidate list and takes the host
+    // CS_OFFLINE - the mask is doing exactly what the user asked, and the only
+    // thing left to do is tell them which type to re-allow.
+    if (!probe.sawLiteral || probe.anyLiteralAllowed) {
+        return 0;
+    }
+
+    return probe.reachableTypes;
+}
+
+QString NvComputer::getNameSuppressedAddress() const
+{
+    const LinkFilterProbe probe = probeLinkFilter();
+
+    // The third state, and the one the mask cannot repair on its own: a literal
+    // exists and the mask approved it, so the poller is probing an address the
+    // user allowed, and it is not answering. The name would answer - it resolves
+    // again at connect time and would go wherever DNS points then - but using
+    // it here is the hole this whole feature exists to close, so it is not used.
+    //
+    // Requiring anyLiteralAllowed is what separates this from the mask-excluded
+    // case: there the mask itself is the reason nothing is reachable and the
+    // remedy is to select another connection type, here the mask is working
+    // exactly as asked and the approved address is simply stale, asleep, or
+    // gone. Reporting them with the same words would send the user to fix the
+    // wrong thing.
+    if (probe.name.isEmpty() || !probe.sawLiteral || !probe.anyLiteralAllowed) {
+        return QString();
+    }
+
+    // Online through the name would mean allowedAddresses() still had it, which
+    // is the state above. So reaching here with the host online would be a
+    // contradiction rather than a fact worth showing, and the ordinary
+    // "nothing is wrong" answer is the honest one.
+    if (probe.hostOnline) {
+        return QString();
+    }
+
+    return probe.name;
+}
+
+bool NvComputer::hasNameAddress() const
+{
+    QReadLocker readLocker(&lock);
+
+    // Only these two can be a name: manualAddress is whatever the user typed
+    // into addNewHostManually(), and activeAddress can hold a name only while
+    // the poller had nothing else to latch - which, once allowedAddresses()
+    // drops names as soon as a literal exists, is the same window in which we
+    // hold no literal at all. The rest are literals by construction: mdns
+    // announces IPs, localAddress comes from the host's own LocalIP, and
+    // remoteAddress/ipv6Address are parsed addresses.
+    const NvAddress& manual = manualAddress;
+    const NvAddress& active = activeAddress;
+
+    return (!manual.isNull() && !netAddressIsLiteral(manual.address())) ||
+           (!active.isNull() && !netAddressIsLiteral(active.address()));
+}
+
 bool NvComputer::update(const NvComputer& that)
 {
     bool changed = false;
 
+    // Whether to accept that.activeAddress depends on a routing probe, and
+    // netRoutesTo() blocks on a UDP connect (up to a second) plus two
+    // QNetworkInterface::allInterfaces() enumerations. That is far too much
+    // work to do while holding the write lock below, which every read of this
+    // host contends with: the GUI model roles, getConflictingLinkDescription(),
+    // the poller's allowedAddresses() and updateAppList(), and
+    // setHostConnectionOptions(). So the probe runs first, unlocked, and the
+    // write lock is only taken once its inputs are known.
+    //
+    // that is safe to read here because every caller passes a local object that
+    // no other thread can reach (computermanager.cpp passes newState,
+    // httpsComputer and newComputer). allowedLinkTypes is genuine shared state
+    // written from the GUI thread, so it is snapshotted and re-validated below.
+    NvAddress probedAddress;
+    quint32 probedMask = 0;
+    bool probeNeeded = false;
+    {
+        QReadLocker readLock(&lock);
+        QReadLocker thatReadLock(&that.lock);
+
+        // UUID may not change or we're talking to a new PC
+        Q_ASSERT(this->uuid == that.uuid);
+
+        // The probe is only worth its cost when the value would actually change:
+        // the polling thread re-latches the same address every round, and a host
+        // that allows every connection type has nothing to filter in the first
+        // place.
+        //
+        // A hostname is excluded from the probe entirely. netRoutesTo() cannot
+        // classify one, so its verdict would always be "no allowed route" and
+        // the address could never be latched - which for a host the user added
+        // by name is the same permanent-offline bug allowedAddresses() has, and
+        // the worse of the two, since nothing re-probes a name. Latching it
+        // instead leaves the mask unenforced on this host, which
+        // getUnclassifiableAddress() reports; that is strictly better than
+        // never reaching the host again.
+        //
+        // This is consistent with allowedAddresses() dropping names as soon as
+        // a literal exists: we only reach here with a name to accept in the
+        // window where we hold no literal at all, so latching one can never
+        // outrank a literal that the mask approved.
+        if (NetLinkFilter::kEnabled && this->allowedLinkTypes != NLT_ALL &&
+                this->activeAddress != that.activeAddress && !that.activeAddress.isNull() &&
+                netAddressIsLiteral(that.activeAddress.address())) {
+            probeNeeded = true;
+            probedAddress = that.activeAddress;
+            probedMask = this->allowedLinkTypes;
+        }
+    }
+
+    // True means the address may be latched; a false verdict keeps the address
+    // we already had. Note that allowedAddresses() cannot be used for the same
+    // job, since CopySafeReadWriteLock is not recursive and we do not hold the
+    // lock at this point anyway.
+    bool probedAddressAllowed = true;
+    if (probeNeeded) {
+        const QVector<NetRoute> routes =
+            netRoutesTo(QHostAddress(probedAddress.address()), probedAddress.port());
+        probedAddressAllowed = bestAllowedRoute(routes, probedMask).isUsable();
+    }
+
     // Lock us for write and them for read
     QWriteLocker thisLock(&this->lock);
     QReadLocker thatLock(&that.lock);
-
-    // UUID may not change or we're talking to a new PC
-    Q_ASSERT(this->uuid == that.uuid);
 
 #define ASSIGN_IF_CHANGED(field)       \
     if (this->field != that.field) {   \
@@ -556,13 +1041,79 @@ bool NvComputer::update(const NvComputer& that)
     ASSIGN_IF_CHANGED_AND_NONNULL(remoteAddress);
     ASSIGN_IF_CHANGED_AND_NONNULL(ipv6Address);
     ASSIGN_IF_CHANGED_AND_NONNULL(manualAddress);
+    // Refreshed on every mDNS announcement so newly advertised addresses
+    // become selectable. This must be "AND_NONEMPTY" because a host polled
+    // over the control port has no mDNS addresses at all, and blindly copying
+    // that empty list would discard the ones mDNS discovered.
+    // NB: allowedLinkTypes is deliberately NOT assigned here, since it is
+    // user-owned state.
+    ASSIGN_IF_CHANGED_AND_NONEMPTY(mdnsAddresses);
     ASSIGN_IF_CHANGED(activeHttpsPort);
     ASSIGN_IF_CHANGED(externalPort);
     ASSIGN_IF_CHANGED(pairState);
     ASSIGN_IF_CHANGED(serverCodecModeSupport);
     ASSIGN_IF_CHANGED(currentGameId);
-    ASSIGN_IF_CHANGED(activeAddress);
-    ASSIGN_IF_CHANGED(state);
+
+    // The mDNS re-resolution path folds a freshly discovered NvComputer into
+    // this one (see ComputerManager::handleMdnsServiceResolved), and its
+    // activeAddress is simply the first address the host advertised, which the
+    // per-PC connection type filter may well exclude. Latching it anyway would
+    // let a disallowed address reach both the HTTPS control channel and the
+    // RTSP pin in Session::startConnectionAsync(), so keep the address we
+    // already had and let the poller re-evaluate the filtered list instead.
+    //
+    // The per-PC mask gates addresses, not adapters. An address with no route
+    // over a connection type the user allows is never latched, even when it
+    // is the only one that answers: losing the host is far better than letting
+    // an excluded connection type answer for it. Once no address qualifies,
+    // allowedAddresses() returns an empty candidate list and the polling loop
+    // takes the host CS_OFFLINE, which is the intended reading rather than a
+    // failure to report.
+    //
+    // "An address" here means a literal. A hostname carries no route
+    // information at all, so this gate has nothing to say about it either way
+    // and lets it through - see the probe condition above for why that is the
+    // lesser evil, and getUnclassifiableAddress() for how the user finds out.
+    //
+    // The same predicate cannot promise which adapter the traffic leaves
+    // through. bestAllowedRoute() only asks whether SOME route is allowed, and
+    // when two adapters share the host's subnet the destination address cannot
+    // select between them, so the OS interface metric may still pick the
+    // excluded one. That is exactly the case getConflictingLinkDescription()
+    // reports, and it is the only backstop: nothing in the connection path pins
+    // the outgoing interface, because moonlight-common-c derives its source
+    // address from the kernel itself (getLocalAddressByUdpConnect in
+    // Connection.c) and NvHTTP binds no local address either.
+    //
+    // The verdict was computed above from a snapshot of allowedLinkTypes, which
+    // setHostConnectionOptions() can rewrite from the GUI thread at any time. If
+    // the mask moved while the probe was running, the answer describes a mask
+    // that no longer exists, so it is discarded and the old address kept. That
+    // is the conservative direction for a mask that was narrowed, and for one
+    // that was widened it costs nothing: setHostConnectionOptions() clears
+    // activeAddress anyway, and the poller re-evaluates within one round.
+    bool acceptActiveAddress = true;
+    if (probeNeeded) {
+        acceptActiveAddress = (this->allowedLinkTypes == probedMask) && probedAddressAllowed;
+    }
+    if (acceptActiveAddress) {
+        ASSIGN_IF_CHANGED(activeAddress);
+    }
+
+    // CS_ONLINE without an address is not a state anything downstream can
+    // use: Session::startConnectionAsync() and the poller's updateAppList()
+    // both build an NvHTTP from activeAddress, which asserts on a null one
+    // and otherwise produces a URL with no host. So the "online" verdict has
+    // to follow the address we actually accepted, rather than being taken
+    // unconditionally. Leaving the previous state in place is enough to make
+    // the host re-evaluate: the poller runs again in a few seconds.
+    //
+    // Under the hard-gate mask this is reachable only via the mDNS fold above,
+    // since the poller can never offer an address the filter rejected. It stays
+    // as the second line of defense rather than relying on that invariant.
+    if (!(that.state == NvComputer::CS_ONLINE && this->activeAddress.isNull())) {
+        ASSIGN_IF_CHANGED(state);
+    }
     ASSIGN_IF_CHANGED(gfeVersion);
     ASSIGN_IF_CHANGED(appVersion);
     ASSIGN_IF_CHANGED(isSupportedServerVersion);

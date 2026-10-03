@@ -16,7 +16,10 @@
 #include <QRunnable>
 #include <QTimer>
 #include <QMutex>
+#include <QHostInfo>
 #include <QWaitCondition>
+
+#include <utility>
 
 class ComputerManager;
 
@@ -227,7 +230,9 @@ public:
 
     Q_INVOKABLE void addNewHostManually(QString address);
 
-    void addNewHost(NvAddress address, bool mdns, QString name = QString(), NvAddress mdnsIpv6Address = NvAddress());
+    void addNewHost(NvAddress address, bool mdns, QString name = QString(),
+                    NvAddress mdnsIpv6Address = NvAddress(),
+                    QVector<QHostAddress> mdnsAddresses = QVector<QHostAddress>());
 
     QString generatePinString();
 
@@ -241,6 +246,8 @@ public:
     void deleteHost(NvComputer* computer);
 
     void renameHost(NvComputer* computer, QString name);
+
+    void setHostConnectionOptions(NvComputer* computer, quint32 allowedLinkTypes);
 
     void clientSideAttributeUpdated(NvComputer* computer);
 
@@ -260,10 +267,65 @@ private slots:
 
     void handleMdnsServiceResolved(MdnsPendingComputer* computer, QVector<QHostAddress>& addresses);
 
+    // Completion handler for the hostname resolution started by
+    // setHostConnectionOptions() and by handleReResolveHostAddresses(). `uuid`
+    // rather than the host pointer because the host can be deleted while the
+    // lookup is in flight, and NvComputer is not a QObject, so there is no
+    // QPointer to lean on. `replaceExisting` supersedes the literals we already
+    // hold instead of joining them - see resolveHostAddresses().
+    void handleHostAddressResolved(QString uuid, QString name, quint16 port,
+                                   QHostInfo info, bool replaceExisting);
+
+    // Re-resolves a named host whose known addresses have stopped answering.
+    // Connected to PcMonitorThread::reResolveHostAddresses, so it arrives on our
+    // thread, and looks the host up by uuid rather than trusting the pointer the
+    // emit handed over: deleteHost() can remove the host from the map while the
+    // call is still queued.
+    void handleReResolveHostAddresses(NvComputer* computer);
+
 private:
     void saveHosts();
 
     void saveHost(NvComputer* computer);
+
+    // Phase two of host deletion. DeferredHostDeletionTask does everything that
+    // can block (stopping the polling thread, removing the host from the map) on
+    // a worker thread, then hands the object to us so that the free itself runs
+    // on our thread. That is the only correct place for it: every other pointer
+    // to an NvComputer - the lookupHost callback, the QML-invoked setters, the
+    // ComputerModel/AppModel slots - lives on our thread, and a free on the
+    // worker would race all of them. NvComputer is not a QObject, so there is no
+    // QPointer to fall back on.
+    //
+    // Safe to call from any thread.
+    void enqueueHostDeletion(NvComputer* computer);
+
+    // Frees everything enqueueHostDeletion() parked. Only call this on our own
+    // thread. The destructor calls it too, because at exit the event loop is
+    // already gone - main.cpp only waits for the thread pool after app.exec()
+    // returns - so the queued drain would never be delivered.
+    void drainPendingHostDeletions();
+
+    // Resolves every non-literal address `computer` knows into
+    // NvComputer::resolvedAddresses, so the connection type filter has literals
+    // to classify. Asynchronous, because it runs on the GUI thread that QML
+    // called setHostConnectionOptions() from, and a blocking lookup would stall
+    // the UI for the length of a DNS timeout.
+    //
+    // Only called when a mask other than NLT_ALL is being applied: that is the
+    // only time a literal is needed, so a host with no user preference never
+    // pays for a lookup and keeps the address list it had before this feature
+    // existed.
+    //
+    // `replaceExisting` is for the re-resolve path (see
+    // handleReResolveHostAddresses()): the literals we already hold were
+    // resolved from the same name at some point in the past and may describe an
+    // address the PC has since moved away from, so a fresh answer supersedes
+    // them rather than joining them. The mask-change path must NOT do that: a
+    // host can be addressed by two names, and the second lookup's answer would
+    // then evict the first one's, leaving whichever resolved last in the list.
+    void resolveHostAddresses(NvComputer* computer, quint32 allowedLinkTypes,
+                              bool replaceExisting = false);
 
     QHostAddress getBestGlobalAddressV6(QVector<QHostAddress>& addresses);
 
@@ -283,4 +345,6 @@ private:
     QMutex m_DelayedFlushMutex; // Lock ordering: Must never be acquired while holding NvComputer lock
     QWaitCondition m_DelayedFlushCondition;
     bool m_NeedsDelayedFlush;
+    QMutex m_PendingDeletionMutex;
+    QVector<NvComputer*> m_PendingDeletion;
 };
